@@ -3,7 +3,7 @@ import os
 
 @dataclass(frozen=True)
 class AppConfig:
-    owner_id: int
+    owner_id: int | None
     admin_channel_ids: set[int]
     trusted_model: str
     untrusted_model: str
@@ -11,12 +11,40 @@ class AppConfig:
     trusted_max_tokens: int
     untrusted_max_tokens: int
 
+def _parse_optional_int(raw_value: str | None) -> int | None:
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip()
+    if not value:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_admin_channel_ids(raw_value: str) -> set[int]:
+    admin_channel_ids: set[int] = set()
+
+    for item in raw_value.split(","):
+        value = item.strip()
+        if not value:
+            continue
+
+        try:
+            admin_channel_ids.add(int(value))
+        except ValueError:
+            continue
+
+    return admin_channel_ids
+
+
 def load_config() -> AppConfig:
-    owner_id = int(os.environ["OWNER_ID"])
+    owner_id = _parse_optional_int(os.getenv("OWNER_ID"))
     admin_channels_raw = os.getenv("ADMIN_CHANNEL_IDS", "")
-    admin_channel_ids = {
-        int(x.strip()) for x in admin_channels_raw.split(",") if x.strip()
-    }
+    admin_channel_ids = _parse_admin_channel_ids(admin_channels_raw)
 
     return AppConfig(
         owner_id=owner_id,

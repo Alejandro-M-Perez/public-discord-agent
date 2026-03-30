@@ -3,6 +3,8 @@ Important:
 - The application layer must prevent untrusted users from ever using the hosted model.
 - Do not rely on provider fallbacks for access control.
 - Keep the hosted provider configured for trusted use, while the router enforces that public traffic stays local-only.
+- Phase-1 should block any disallowed channel or non-owner DM before model selection.
+- If the local public model is unavailable, refuse the request instead of falling back to hosted.
 
 {
   "gateway": {
