@@ -1,133 +1,292 @@
-# Claw Capone Architecture Handoff
+# Claw Capone
 
-This repo contains the phase-1 architecture handoff for a Discord + OpenClaw agent with trust-based routing.
+Claw Capone is a Discord bot framework that keeps trust and security enforcement in application code, uses OpenClaw only as a trusted backend, and serves public users with deterministic responses instead of model output.
 
-## Implementation Rule (Critical)
+The current system is designed around three modes:
 
-Access control must be enforced in code before:
-- model invocation
-- tool execution
+- `trusted`: owner-only, hosted model path through OpenClaw
+- `untrusted`: admitted public users, deterministic command responses only
+- `refused`: denied before any model or tool execution
 
-Prompts are NOT the security boundary.
+## Features
 
-If anything is ambiguous, fail closed to the untrusted path.
+- Strict trust routing based on Discord `author.id`
+- Fail-closed admission policy enforced before model selection or tool execution
+- Trusted path isolated to `owner:<OWNER_ID>` sessions
+- Public path isolated to `public:<USER_ID>` sessions
+- Deterministic public behavior with exact commands only: `!help`, `!status`, `!about`
+- Public cooldown and duplicate-message suppression
+- Centralized persona files for all non-security text
+- Structured request logging without logging secrets or prompts
+- OpenClaw used as backend-only HTTP transport for trusted requests
+- Test coverage for routing, isolation, persona loading, deterministic public behavior, and trusted transport
 
-## Objective
+## Current Behavior
 
-Implement a Discord/OpenClaw routing layer with two trust tiers:
+### Trusted
 
-- trusted: only the owner
-- untrusted: everyone else
+Trusted requests are allowed only when both conditions are true:
 
-### Trusted path
-- uses hosted GPT model
-- can access approved tools
-- has persistent owner session state
-- supports longer context and multi-step execution
-- should be used only in the owner DM or in an allowlisted admin channel
+- `author.id == OWNER_ID`
+- the message is in an allowed location
 
-### Untrusted path
-- uses deterministic public responses only
-- has no privileged tools
-- has no access to owner memory or shared context
-- should be short-response, low-capability, and isolated per user
-- must never invoke the hosted model
+Allowed locations:
 
-### Refused path
-- blocks all model invocation outside the phase-1 channel policy
-- blocks all non-owner DMs
-- blocks owner messages in non-allowlisted public channels
-- blocks session allocation and tool execution
+- DM with the bot from the owner
+- channels listed in `ADMIN_CHANNEL_IDS`
 
-## Environment
+Trusted requests:
 
-- OS: WSL2 Ubuntu
-- Discord bot already exists
-- OpenClaw already installed
-- OpenAI API key available as `OPENAI_API_KEY`
-- LM Studio runs on the host machine and exposes an OpenAI-compatible endpoint
-- Expected local endpoint: `http://127.0.0.1:1234/v1`
-- If WSL cannot reach `127.0.0.1:1234`, use the Windows host IP instead
+- use backend alias `openai/gpt-trusted`
+- go through the OpenClaw HTTP responses endpoint
+- can use only the trusted tool allowlist
+- keep the owner session namespace `owner:<OWNER_ID>`
 
-## OpenClaw notes
+### Untrusted
 
-Useful commands during setup:
+Untrusted requests are non-owner messages in allowed public channels.
 
-```bash
-openclaw onboard
-openclaw gateway status
-openclaw dashboard
-```
+Untrusted requests:
 
-## WSL Runbook
+- do not invoke any model
+- do not invoke trusted tools
+- use deterministic public responses only
+- keep the per-user session namespace `public:<USER_ID>`
+- are subject to public rate limiting and duplicate suppression
 
-Phase-1 channel policy:
+### Refused
 
-- only the owner may DM the bot
-- server traffic is allowed only in `ADMIN_CHANNEL_IDS`
-- all other channels are denied before model invocation
+Everything else is refused.
 
-Recommended environment in WSL:
+Refused requests:
 
-```bash
-export OWNER_ID=123456789012345678
-export ADMIN_CHANNEL_IDS=111111111111111111,222222222222222222
-export OPENAI_API_KEY=your_openai_key
-```
+- do not invoke any model
+- do not invoke any tool
+- do not create a session
+- return a deterministic refusal response from the Discord layer
 
-LM Studio endpoint from WSL:
+## Security Model
 
-- default local endpoint: `http://127.0.0.1:1234/v1`
-- if WSL cannot reach that loopback address, use the Windows host IP in your OpenClaw config instead
+Critical rules:
 
-Run tests from WSL:
+- access control is enforced in code before model invocation
+- access control is enforced in code before tool execution
+- prompts are not a security boundary
+- ambiguous or invalid states fail closed
+- untrusted users never reach the hosted model
+- OpenClaw does not own Discord and does not decide trust
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+This separation is intentional:
 
-Run the Discord bot from WSL:
+- `src/main.py` owns Discord I/O
+- `src/router.py` decides trust and policy
+- `src/discord_handler.py` applies the policy
+- OpenClaw is only the trusted backend transport
 
-1. Ensure `.env` contains at least:
-   - `DISCORD_BOT_TOKEN`
-   - `OWNER_ID`
-   - `ADMIN_CHANNEL_IDS`
-   - `OPENCLAW_GATEWAY_TOKEN`
-2. Ensure the OpenClaw gateway is running and reachable from WSL.
-3. Install Discord client dependencies:
+## Architecture
+
+### Request Flow
+
+1. `src/main.py` receives a Discord message.
+2. Bot-authored messages are ignored.
+3. `src/discord_handler.py` builds a request context and asks `src/router.py` for a policy.
+4. If the policy is `refused`, the handler returns a refusal response immediately.
+5. If the policy is `untrusted`, the handler uses the deterministic public responder and optional rate limiting.
+6. If the policy is `trusted`, the handler allocates the owner session namespace, enforces the tool firewall, and calls the OpenClaw gateway.
+7. `src/main.py` sends any non-empty reply back to the same Discord channel.
+
+### Key Modules
+
+- [src/main.py](/home/loopk/projects/ClawCapone/src/main.py): Discord entrypoint and trusted OpenClaw HTTP client
+- [src/router.py](/home/loopk/projects/ClawCapone/src/router.py): trust classification and admission policy
+- [src/policies.py](/home/loopk/projects/ClawCapone/src/policies.py): execution policy definitions
+- [src/discord_handler.py](/home/loopk/projects/ClawCapone/src/discord_handler.py): central request execution path
+- [src/tool_firewall.py](/home/loopk/projects/ClawCapone/src/tool_firewall.py): trusted tool allowlist enforcement
+- [src/session_manager.py](/home/loopk/projects/ClawCapone/src/session_manager.py): session namespace enforcement
+- [src/public_responder.py](/home/loopk/projects/ClawCapone/src/public_responder.py): deterministic public command/default responses
+- [src/public_rate_limiter.py](/home/loopk/projects/ClawCapone/src/public_rate_limiter.py): public cooldown and duplicate suppression
+- [src/persona_loader.py](/home/loopk/projects/ClawCapone/src/persona_loader.py): persona loading, validation, and safe fallback
+
+## Getting Started
+
+### Requirements
+
+- Python 3.11+
+- WSL2 Ubuntu or Linux shell
+- a Discord bot token
+- a running OpenClaw gateway
+- OpenClaw configured with access to the hosted backend alias `openai/gpt-trusted`
+
+### Install Python dependency
 
 ```bash
 python3 -m pip install discord.py
 ```
 
-4. Start the bot:
+### Create `.env`
+
+Create a `.env` file in the repo root with:
+
+```dotenv
+DISCORD_BOT_TOKEN=your_discord_bot_token
+OPENCLAW_GATEWAY_TOKEN=your_openclaw_gateway_token
+OWNER_ID=123456789012345678
+ADMIN_CHANNEL_IDS=111111111111111111,222222222222222222
+LOG_LEVEL=INFO
+```
+
+Notes:
+
+- `OWNER_ID` is the only trusted principal
+- `ADMIN_CHANNEL_IDS` controls which server channels are admitted
+- `.env` is ignored by git
+
+### Configure OpenClaw
+
+Use [config/openclaw.example.json](/home/loopk/projects/ClawCapone/config/openclaw.example.json) as the starting point for your active OpenClaw config.
+
+The active OpenClaw config must reflect the current integration:
+
+- `gateway.mode` must be `"local"`
+- `gateway.auth.mode` must be `"token"`
+- `gateway.http.endpoints.responses.enabled` must be `true`
+- the built-in Discord provider must be disabled
+- built-in Discord provider disabled is a required part of the active config
+
+Important:
+
+- Discord is handled only by [src/main.py](/home/loopk/projects/ClawCapone/src/main.py)
+- OpenClaw is backend-only in this project
+- do not enable OpenClaw’s Discord channel provider for this bot
+- enable the HTTP responses endpoint in the active OpenClaw config
+- do not use prompt text for routing or security
+
+### OpenClaw HTTP contract
+
+Trusted requests are sent as:
+
+- `POST http://127.0.0.1:18789/v1/responses`
+- `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>`
+- `Content-Type: application/json`
+- request body `model: "openclaw/default"`
+- header `x-openclaw-model: openai/gpt-trusted`
+- header `x-openclaw-session-key: owner:<OWNER_ID>`
+
+If the trusted backend fails, the Discord loop keeps running and returns a short fallback response.
+
+### Run the bot
 
 ```bash
 python3 src/main.py
 ```
 
-Trusted-path integration details:
+## Persona Customization
 
-- Discord is handled only by `src/main.py`
-- the active OpenClaw config must keep any built-in Discord provider disabled
-- the active OpenClaw config must enable the HTTP responses endpoint
-- trusted requests POST to `http://127.0.0.1:18789/v1/responses`
-- the request uses `Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>`
-- the request uses `Content-Type: application/json`
-- the OpenClaw agent target is `openclaw/default`
-- the selected backend alias is forwarded in `x-openclaw-model`
-- the trusted session namespace is forwarded in `x-openclaw-session-key`
-- no V1 prompt-based routing or built-in Discord channel handling should be enabled in OpenClaw
+All non-security response text is loaded from persona files.
 
-## Persona Layer
+Tracked examples live in `persona_templates/`:
 
-Customize deterministic text by copying the tracked examples in `persona_templates/` into `persona/active/`:
+- `profile.example.json`
+- `public_responses.example.json`
+- `refused_responses.example.json`
+- `command_text.example.json`
 
-- `profile.json`
-- `public_responses.json`
-- `refused_responses.json`
-- `command_text.json`
+Local overrides live in `persona/active/` and are ignored by git.
 
-Those files are ignored by git, so local customization stays out of the repo. If any active persona file is missing or invalid, the loader falls back safely to the tracked example defaults.
+To customize:
 
-Persona files affect only deterministic response text. They do not change trust routing, admission policy, model selection, tool permissions, rate-limit enforcement, or any other security behavior.
+1. Copy the example files into `persona/active/`.
+2. Edit the text values.
+3. Restart the bot.
+
+Persona can change:
+
+- refusal lines
+- default public lines
+- rate-limit lines
+- duplicate-suppression lines
+- exact command text for `!help`, `!status`, and `!about`
+
+Persona cannot change:
+
+- trust routing
+- model access
+- tool permissions
+- session isolation
+- rate-limit enforcement rules
+- any other security behavior
+
+## Public Command System
+
+Public deterministic mode supports exact commands only:
+
+- `!help`
+- `!status`
+- `!about`
+
+Everything else returns the default limited-access response.
+
+There is no fuzzy matching and no natural-language command interpretation on the public path.
+
+## Observability
+
+The handler emits one structured log per Discord message with fields including:
+
+- `author_id`
+- `channel_id`
+- `is_dm`
+- `admission_result`
+- `policy_mode`
+- `response_mode`
+- `model_alias`
+- `session_namespace`
+- `tool_blocked`
+
+Trusted transport logging also records:
+
+- request URL
+- OpenClaw target
+- backend model override
+- session key
+- success or failure
+
+Secrets, tokens, and prompts are not logged.
+
+## Testing
+
+Run the full test suite with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Current test coverage includes:
+
+- trust routing and fail-closed behavior
+- refused and public model isolation
+- trusted hosted-path isolation
+- tool firewall enforcement
+- session isolation
+- persona loading and fallback behavior
+- deterministic phrase rotation
+- public rate limiting
+- trusted OpenClaw transport contract
+- trusted-path HTTP error fallback behavior
+
+## WSL Notes
+
+- If OpenClaw or other local services are hosted on Windows, confirm WSL can reach the configured endpoints.
+- The default trusted OpenClaw endpoint in this project is `http://127.0.0.1:18789/v1/responses`.
+- If your OpenClaw or LM Studio setup is bound elsewhere, update the active backend config accordingly.
+
+## Project Status
+
+The project currently provides a secure owner-trusted Discord bot shell with:
+
+- trusted hosted execution through OpenClaw
+- deterministic public handling
+- centralized persona-driven text
+- structured observability
+- test-backed security boundaries
+
+It is intentionally conservative on the public path. Public users do not get model access in the current implementation.
