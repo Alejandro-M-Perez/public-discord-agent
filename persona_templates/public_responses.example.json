@@ -1,0 +1,14 @@
+{
+  "default_response": [
+    "Limited access: public users can use only !help, !status, and !about right now.",
+    "Public access is limited. Try !help, !status, or !about."
+  ],
+  "rate_limited_response": [
+    "Slow down. Public access is rate limited.",
+    "Rate limit hit. Wait a moment before trying again."
+  ],
+  "duplicate_suppressed_response": [
+    "Duplicate message ignored in limited public mode.",
+    "Repeated public message suppressed."
+  ]
+}

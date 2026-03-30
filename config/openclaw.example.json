@@ -2,13 +2,30 @@ Important:
 - This config is a starting point, not the full security implementation.
 - The application layer must prevent untrusted users from ever using the hosted model.
 - Do not rely on provider fallbacks for access control.
-- Keep the hosted provider configured for trusted use, while the router enforces that public traffic stays local-only.
+- Keep the hosted provider configured for trusted use, while the router enforces that public traffic stays model-free or local-only.
 - Phase-1 should block any disallowed channel or non-owner DM before model selection.
 - If the local public model is unavailable, refuse the request instead of falling back to hosted.
+- Discord is owned by `src/main.py`, not by OpenClaw channel providers.
+- The active OpenClaw config must enable the HTTP responses endpoint and disable the built-in Discord provider.
 
 {
   "gateway": {
-    "mode": "local"
+    "mode": "local",
+    "auth": {
+      "mode": "token"
+    },
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "channels": {
+    "discord": {
+      "enabled": false
+    }
   },
   "agents": {
     "defaults": {

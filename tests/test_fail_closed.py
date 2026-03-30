@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from config import AppConfig
 from discord_handler import DiscordHandler
+from public_rate_limiter import PublicRateLimiter
 from public_responder import PublicResponder
 from router import RequestContext, TrustRouter
 
@@ -32,12 +33,15 @@ def make_config(
 
 
 class FakeOpenClawClient:
-    def __init__(self) -> None:
+    def __init__(self, *, error=None, blocked_tool=None) -> None:
         self.calls = []
-        self.error = None
+        self.error = error
+        self.blocked_tool = blocked_tool
 
     async def generate_response(self, **kwargs):
         self.calls.append(kwargs)
+        if self.blocked_tool is not None:
+            kwargs["tool_checker"](self.blocked_tool)
         if self.error is not None:
             raise self.error
         return "ok"
@@ -50,7 +54,7 @@ def make_message(*, author_id, channel_id=None, is_dm=False, content="hello"):
     return SimpleNamespace(author=author, channel=channel, guild=guild, content=content)
 
 
-class FailClosedTests(unittest.TestCase):
+class Phase2BBehaviorTests(unittest.TestCase):
     def test_owner_in_non_allowlisted_public_channel_is_refused(self) -> None:
         router = TrustRouter(make_config())
         policy = router.route(RequestContext(author_id=42, channel_id=9999, is_dm=False))
@@ -65,31 +69,31 @@ class FailClosedTests(unittest.TestCase):
         self.assertEqual(policy.mode, "refused")
         self.assertFalse(policy.model_invocation_allowed)
 
-    def test_missing_owner_id_defaults_away_from_trusted(self) -> None:
+    def test_missing_owner_id_defaults_to_refused(self) -> None:
         router = TrustRouter(make_config(owner_id=None))
         policy = router.route(RequestContext(author_id=42, channel_id=None, is_dm=True))
 
         self.assertEqual(policy.mode, "refused")
         self.assertNotEqual(policy.model_alias, "openai/gpt-trusted")
 
-    def test_missing_public_model_does_not_escalate_to_hosted(self) -> None:
+    def test_missing_untrusted_model_does_not_refuse_public_access(self) -> None:
         router = TrustRouter(make_config(untrusted_model=""))
         policy = router.route(RequestContext(author_id=77, channel_id=1001, is_dm=False))
 
-        self.assertEqual(policy.mode, "refused")
-        self.assertNotEqual(policy.model_alias, "openai/gpt-trusted")
-        self.assertFalse(policy.model_invocation_allowed)
+        self.assertEqual(policy.mode, "untrusted")
+        self.assertEqual(policy.session_namespace, "public:77")
 
-    def test_missing_trusted_model_downgrades_owner_to_untrusted(self) -> None:
+    def test_missing_trusted_model_refuses_owner_request(self) -> None:
         router = TrustRouter(make_config(trusted_model=""))
         policy = router.route(RequestContext(author_id=42, channel_id=None, is_dm=True))
 
-        self.assertEqual(policy.mode, "untrusted")
-        self.assertEqual(policy.model_alias, "lmstudio/local-public")
+        self.assertEqual(policy.mode, "refused")
+        self.assertFalse(policy.model_invocation_allowed)
 
-    def test_handler_blocks_refused_requests_before_model_call(self) -> None:
+    def test_refused_requests_return_canned_denial_and_zero_model_calls(self) -> None:
         client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), client, public_responder=responder)
 
         with self.assertLogs("discord_handler", level="INFO") as captured:
             response = asyncio.run(
@@ -98,18 +102,23 @@ class FailClosedTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(response, PublicResponder.DENIAL_RESPONSE)
+        self.assertIn(
+            response,
+            set(responder.persona().refused_responses["denial_response"]),
+        )
         self.assertEqual(client.calls, [])
+        self.assertEqual(len(captured.output), 1)
         joined = "\n".join(captured.output)
-        self.assertIn("discord_request", joined)
         self.assertIn("'admission_result': 'refused'", joined)
-        self.assertIn("'session_namespace': 'no_session'", joined)
-        self.assertIn("local_model_invocation_blocked", joined)
-        self.assertIn("model_invocation_refused", joined)
+        self.assertIn("'policy_mode': 'refused'", joined)
+        self.assertIn("'response_mode': 'refused'", joined)
+        self.assertIn("'model_alias': 'none'", joined)
+        self.assertIn("'session_namespace': 'none'", joined)
 
-    def test_handler_uses_deterministic_public_responder_for_untrusted_requests(self) -> None:
+    def test_untrusted_requests_use_deterministic_public_response_and_zero_model_calls(self) -> None:
         client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), client, public_responder=responder)
 
         with self.assertLogs("discord_handler", level="INFO") as captured:
             response = asyncio.run(
@@ -118,54 +127,42 @@ class FailClosedTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(response, PublicResponder.DEFAULT_RESPONSE)
-        self.assertEqual(client.calls, [])
-        joined = "\n".join(captured.output)
-        self.assertIn("discord_request", joined)
-        self.assertIn("'admission_result': 'allowed'", joined)
-        self.assertIn("'resolved_policy': 'untrusted'", joined)
-        self.assertIn("'selected_model_alias': 'lmstudio/local-public'", joined)
-        self.assertIn("'session_namespace': 'public:77'", joined)
-        self.assertIn("local_model_invocation_skipped", joined)
-        self.assertIn("public_response_generated", joined)
-
-    def test_handler_logs_local_model_blocked_when_untrusted_model_missing(self) -> None:
-        client = FakeOpenClawClient()
-        handler = DiscordHandler(
-            TrustRouter(make_config(untrusted_model="")),
-            client,
+        self.assertIn(
+            response,
+            set(responder.persona().public_responses["default_response"]),
         )
-
-        with self.assertLogs("discord_handler", level="INFO") as captured:
-            response = asyncio.run(
-                handler.handle_message(
-                    make_message(author_id=77, channel_id=1001, is_dm=False)
-                )
-            )
-
-        self.assertEqual(response, PublicResponder.DENIAL_RESPONSE)
         self.assertEqual(client.calls, [])
+        self.assertEqual(len(captured.output), 1)
         joined = "\n".join(captured.output)
-        self.assertIn("local_model_invocation_blocked", joined)
+        self.assertIn("'admission_result': 'admitted'", joined)
+        self.assertIn("'policy_mode': 'untrusted'", joined)
+        self.assertIn("'response_mode': 'public_deterministic'", joined)
+        self.assertIn("'model_alias': 'none'", joined)
+        self.assertIn("'session_namespace': 'public:77'", joined)
 
     def test_trusted_requests_still_invoke_hosted_path(self) -> None:
         client = FakeOpenClawClient()
         handler = DiscordHandler(TrustRouter(make_config()), client)
 
-        response = asyncio.run(
-            handler.handle_message(
-                make_message(author_id=42, channel_id=None, is_dm=True, content="owner request")
+        with self.assertLogs("discord_handler", level="INFO") as captured:
+            response = asyncio.run(
+                handler.handle_message(
+                    make_message(author_id=42, channel_id=None, is_dm=True, content="owner request")
+                )
             )
-        )
 
         self.assertEqual(response, "ok")
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["model_alias"], "openai/gpt-trusted")
         self.assertEqual(client.calls[0]["session_id"], "owner:42")
+        self.assertEqual(len(captured.output), 1)
+        joined = "\n".join(captured.output)
+        self.assertIn("'response_mode': 'trusted_model'", joined)
+        self.assertIn("'model_alias': 'openai/gpt-trusted'", joined)
 
-    def test_public_help_command_returns_canned_response(self) -> None:
-        client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+    def test_public_help_command_returns_exact_persona_response(self) -> None:
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), FakeOpenClawClient(), public_responder=responder)
 
         response = asyncio.run(
             handler.handle_message(
@@ -173,12 +170,11 @@ class FailClosedTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(response, PublicResponder.HELP_RESPONSE)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(response, responder.respond("!help"))
 
-    def test_public_status_command_returns_canned_response(self) -> None:
-        client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+    def test_public_status_command_returns_exact_persona_response(self) -> None:
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), FakeOpenClawClient(), public_responder=responder)
 
         response = asyncio.run(
             handler.handle_message(
@@ -186,12 +182,11 @@ class FailClosedTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(response, PublicResponder.STATUS_RESPONSE)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(response, responder.respond("!status"))
 
-    def test_public_about_command_returns_canned_response(self) -> None:
-        client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+    def test_public_about_command_returns_exact_persona_response(self) -> None:
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), FakeOpenClawClient(), public_responder=responder)
 
         response = asyncio.run(
             handler.handle_message(
@@ -199,30 +194,102 @@ class FailClosedTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(response, PublicResponder.ABOUT_RESPONSE)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(response, responder.respond("!about"))
 
-    def test_public_unknown_message_returns_limited_access_response(self) -> None:
-        client = FakeOpenClawClient()
-        handler = DiscordHandler(TrustRouter(make_config()), client)
+    def test_public_commands_do_not_use_fuzzy_matching(self) -> None:
+        responder = PublicResponder()
+        handler = DiscordHandler(TrustRouter(make_config()), FakeOpenClawClient(), public_responder=responder)
 
         response = asyncio.run(
             handler.handle_message(
-                make_message(author_id=77, channel_id=1001, is_dm=False, content="what can you do?")
+                make_message(author_id=77, channel_id=1001, is_dm=False, content="!help now")
             )
         )
 
-        self.assertEqual(response, PublicResponder.DEFAULT_RESPONSE)
-        self.assertEqual(client.calls, [])
+        self.assertEqual(response, responder.respond("something else"))
 
-    def test_trusted_path_still_surfaces_hosted_failures(self) -> None:
+    def test_public_rate_limiting_returns_short_deterministic_response(self) -> None:
+        responder = PublicResponder()
+        rate_limiter = PublicRateLimiter(cooldown_seconds=60.0)
+        handler = DiscordHandler(
+            TrustRouter(make_config()),
+            FakeOpenClawClient(),
+            public_responder=responder,
+            public_rate_limiter=rate_limiter,
+        )
+
+        first = asyncio.run(
+            handler.handle_message(
+                make_message(author_id=77, channel_id=1001, is_dm=False, content="!help")
+            )
+        )
+        second = asyncio.run(
+            handler.handle_message(
+                make_message(author_id=77, channel_id=1001, is_dm=False, content="!status")
+            )
+        )
+
+        self.assertEqual(first, responder.respond("!help"))
+        self.assertIn(
+            second,
+            set(responder.persona().public_responses["rate_limited_response"]),
+        )
+
+    def test_public_duplicate_suppression_is_deterministic(self) -> None:
+        responder = PublicResponder()
+        rate_limiter = PublicRateLimiter(cooldown_seconds=0.0, suppress_duplicates=True, duplicate_window_seconds=60.0)
+        handler = DiscordHandler(
+            TrustRouter(make_config()),
+            FakeOpenClawClient(),
+            public_responder=responder,
+            public_rate_limiter=rate_limiter,
+        )
+
+        first = asyncio.run(
+            handler.handle_message(
+                make_message(author_id=77, channel_id=1001, is_dm=False, content="hello")
+            )
+        )
+        second = asyncio.run(
+            handler.handle_message(
+                make_message(author_id=77, channel_id=1001, is_dm=False, content="hello")
+            )
+        )
+
+        self.assertIn(
+            first,
+            set(responder.persona().public_responses["default_response"]),
+        )
+        self.assertIn(
+            second,
+            set(responder.persona().public_responses["duplicate_suppressed_response"]),
+        )
+
+    def test_trusted_users_are_not_rate_limited(self) -> None:
         client = FakeOpenClawClient()
-        client.error = RuntimeError("hosted model offline")
+        rate_limiter = PublicRateLimiter(cooldown_seconds=60.0)
+        handler = DiscordHandler(
+            TrustRouter(make_config()),
+            client,
+            public_rate_limiter=rate_limiter,
+        )
+
+        asyncio.run(handler.handle_message(make_message(author_id=42, channel_id=None, is_dm=True, content="one")))
+        asyncio.run(handler.handle_message(make_message(author_id=42, channel_id=None, is_dm=True, content="two")))
+
+        self.assertEqual(len(client.calls), 2)
+
+    def test_trusted_tool_block_is_reflected_in_message_log(self) -> None:
+        client = FakeOpenClawClient(blocked_tool="admin_delete")
         handler = DiscordHandler(TrustRouter(make_config()), client)
 
-        with self.assertRaises(RuntimeError):
-            asyncio.run(
-                handler.handle_message(
-                    make_message(author_id=42, channel_id=None, is_dm=True)
+        with self.assertLogs("discord_handler", level="INFO") as captured:
+            with self.assertRaises(PermissionError):
+                asyncio.run(
+                    handler.handle_message(
+                        make_message(author_id=42, channel_id=None, is_dm=True, content="owner request")
+                    )
                 )
-            )
+
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("'tool_blocked': 'admin_delete'", "\n".join(captured.output))

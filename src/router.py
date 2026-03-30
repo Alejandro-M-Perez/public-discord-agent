@@ -51,17 +51,14 @@ class TrustRouter:
 
         if self.is_trusted_user(ctx):
             if not self._has_model_alias(self.app_config.trusted_model):
-                return self._build_untrusted_policy(user_id=ctx.author_id)
+                return build_refused_policy(
+                    "Request denied because the trusted model is not configured."
+                )
             return build_trusted_policy(
                 owner_id=self.app_config.owner_id,
                 trusted_model=self.app_config.trusted_model,
                 trusted_tools=self.app_config.trusted_tools,
                 max_tokens=self.app_config.trusted_max_tokens,
-            )
-
-        if not self._has_model_alias(self.app_config.untrusted_model):
-            return build_refused_policy(
-                "Request denied because the untrusted model is not configured."
             )
 
         return self._build_untrusted_policy(user_id=ctx.author_id)

@@ -1,0 +1,6 @@
+{
+  "denial_response": [
+    "Access denied. This bot is not available in this channel or DM for your account.",
+    "Request refused. Your account or channel is not enabled for this bot."
+  ]
+}

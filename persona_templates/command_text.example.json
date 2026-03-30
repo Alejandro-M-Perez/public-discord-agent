@@ -1,0 +1,5 @@
+{
+  "!help": "{persona_name} is in limited access mode. Available commands: !help, !status, !about.",
+  "!status": "Status: {persona_name} is running in {public_mode_label}.",
+  "!about": "{persona_name} uses owner-trusted hosted routing and deterministic public responses."
+}

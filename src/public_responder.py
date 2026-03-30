@@ -1,27 +1,38 @@
+from persona_loader import PersonaBundle, PersonaLoader
+
+
 class PublicResponder:
-    HELP_RESPONSE = (
-        "Limited access mode. Available commands: !help, !status, !about."
-    )
-    STATUS_RESPONSE = (
-        "Status: public access is in limited deterministic mode."
-    )
-    ABOUT_RESPONSE = (
-        "Claw Capone is running owner-trusted hosted routing with limited public access."
-    )
-    DEFAULT_RESPONSE = (
-        "Limited access: public users can use only !help, !status, and !about right now."
-    )
-    DENIAL_RESPONSE = (
-        "Access denied. This bot is not available in this channel or DM for your account."
-    )
+    def __init__(self, persona_loader: PersonaLoader | None = None):
+        self.persona_loader = persona_loader or PersonaLoader()
 
-    COMMAND_RESPONSES = {
-        "!help": HELP_RESPONSE,
-        "!status": STATUS_RESPONSE,
-        "!about": ABOUT_RESPONSE,
-    }
+    def persona(self) -> PersonaBundle:
+        return self.persona_loader.load()
 
-    @classmethod
-    def respond(cls, message_text: str) -> str:
-        command = message_text.strip().split(maxsplit=1)[0].lower() if message_text.strip() else ""
-        return cls.COMMAND_RESPONSES.get(command, cls.DEFAULT_RESPONSE)
+    def refusal_response(self, seed: str | None = None) -> str:
+        persona = self.persona()
+        return self.persona_loader.choose_line(
+            persona.refused_responses["denial_response"],
+            seed=seed,
+        )
+
+    def rate_limited_response(self, reason: str, seed: str | None = None) -> str:
+        persona = self.persona()
+        if reason == "duplicate":
+            return self.persona_loader.choose_line(
+                persona.public_responses["duplicate_suppressed_response"],
+                seed=seed,
+            )
+        return self.persona_loader.choose_line(
+            persona.public_responses["rate_limited_response"],
+            seed=seed,
+        )
+
+    def respond(self, message_text: str, seed: str | None = None) -> str:
+        persona = self.persona()
+        command = message_text.strip()
+        if command in persona.command_text:
+            return persona.command_text[command]
+        return self.persona_loader.choose_line(
+            persona.public_responses["default_response"],
+            seed=seed,
+        )
